@@ -37,89 +37,92 @@ static void sig_proc_exit(struct mproc *rmp, int signo);
 /*===========================================================================*
  *				do_sigaction				     *
  *===========================================================================*/
-int do_sigaction(void) {
-    int result;
-    int signal_number;
-    struct sigaction sig_action_vec;
-    struct sigaction *sig_action_ptr;
+int do_sigaction(void)
+{
+  int r, sig_nr;
+  struct sigaction svec;
+  struct sigaction *svp;
 
-    if (mp->mp_flags & (PROC_STOPPED | VFS_CALL | UNPAUSED | EVENT_CALL)) return(EINVAL);
+  if (mp->mp_flags & (PROC_STOPPED | VFS_CALL | UNPAUSED | EVENT_CALL)) {
+    return(EINVAL);
+  }
 
-    signal_number = m_in.m_lc_pm_sig.nr;
-    if (signal_number == SIGKILL) return(OK);
-    if (signal_number < 1 || signal_number >= _NSIG) return(EINVAL);
-
-    sig_action_ptr = &mp->mp_sigact[signal_number];
-    if (m_in.m_lc_pm_sig.oact != NULL) {
-        result = sys_datacopy(PM_PROC_NR, (vir_bytes)sig_action_ptr, who_e,
-                              m_in.m_lc_pm_sig.oact, sizeof(sig_action_vec));
-        if (result != OK) return(result);
-    }
-
-    if (m_in.m_lc_pm_sig.act == NULL) return(OK);
-
-    result = sys_datacopy(who_e, m_in.m_lc_pm_sig.act, PM_PROC_NR, (vir_bytes)&sig_action_vec,
-                          sizeof(sig_action_vec));
-    if (result != OK) return(result);
-
-    switch (sig_action_vec.sa_handler) {
-        case SIG_IGN:
-            sigaddset(&mp->mp_ignore, signal_number);
-            sigdelset(&mp->mp_sigpending, signal_number);
-            sigdelset(&mp->mp_ksigpending, signal_number);
-            sigdelset(&mp->mp_catch, signal_number);
-            break;
-        case SIG_DFL:
-            sigdelset(&mp->mp_ignore, signal_number);
-            sigdelset(&mp->mp_catch, signal_number);
-            break;
-        default:
-            sigdelset(&mp->mp_ignore, signal_number);
-            sigaddset(&mp->mp_catch, signal_number);
-            break;
-    }
-
-    mp->mp_sigact[signal_number].sa_handler = sig_action_vec.sa_handler;
-    sigdelset(&sig_action_vec.sa_mask, SIGKILL);
-    sigdelset(&sig_action_vec.sa_mask, SIGSTOP);
-    mp->mp_sigact[signal_number].sa_mask = sig_action_vec.sa_mask;
-    mp->mp_sigact[signal_number].sa_flags = sig_action_vec.sa_flags;
-    mp->mp_sigreturn = m_in.m_lc_pm_sig.ret;
+  sig_nr = m_in.m_lc_pm_sig.nr;
+  if (sig_nr == SIGKILL) {
     return(OK);
+  }
+  if (sig_nr < 1 || sig_nr >= _NSIG) {
+    return(EINVAL);
+  }
+
+  svp = &mp->mp_sigact[sig_nr];
+  if (m_in.m_lc_pm_sig.oact != 0) {
+    r = sys_datacopy(PM_PROC_NR, (vir_bytes) svp, who_e,
+        m_in.m_lc_pm_sig.oact, (phys_bytes) sizeof(svec));
+    if (r != OK) {
+      return(r);
+    }
+  }
+
+  if (m_in.m_lc_pm_sig.act == 0) {
+    return(OK);
+  }
+
+  r = sys_datacopy(who_e, m_in.m_lc_pm_sig.act, PM_PROC_NR, (vir_bytes) &svec,
+      (phys_bytes) sizeof(svec));
+  if (r != OK) {
+    return(r);
+  }
+
+  if (svec.sa_handler == SIG_IGN) {
+    sigaddset(&mp->mp_ignore, sig_nr);
+    sigdelset(&mp->mp_sigpending, sig_nr);
+    sigdelset(&mp->mp_ksigpending, sig_nr);
+    sigdelset(&mp->mp_catch, sig_nr);
+  } else if (svec.sa_handler == SIG_DFL) {
+    sigdelset(&mp->mp_ignore, sig_nr);
+    sigdelset(&mp->mp_catch, sig_nr);
+  } else {
+    sigdelset(&mp->mp_ignore, sig_nr);
+    sigaddset(&mp->mp_catch, sig_nr);
+  }
+  
+  mp->mp_sigact[sig_nr].sa_handler = svec.sa_handler;
+  sigdelset(&svec.sa_mask, SIGKILL);
+  sigdelset(&svec.sa_mask, SIGSTOP);
+  mp->mp_sigact[sig_nr].sa_mask = svec.sa_mask;
+  mp->mp_sigact[sig_nr].sa_flags = svec.sa_flags;
+  mp->mp_sigreturn = m_in.m_lc_pm_sig.ret;
+  
+  return(OK);
 }
 
 /*===========================================================================*
  *				do_sigpending                                *
  *===========================================================================*/
-#include <assert.h>
-
 int do_sigpending(void)
 {
-  if (mp == NULL) return ERROR;
+  if (mp == NULL) {
+    return EINVAL;
+  }
 
-  unsigned int invalid_flags = (PROC_STOPPED | VFS_CALL | UNPAUSED | EVENT_CALL);
-  if ((mp->mp_flags & invalid_flags) != 0) return ERROR;
+  if (mp->mp_flags & (PROC_STOPPED | VFS_CALL | UNPAUSED | EVENT_CALL)) {
+    return EINVAL;
+  }
 
   mp->mp_reply.m_pm_lc_sigset.set = mp->mp_sigpending;
-
   return OK;
 }
 
 /*===========================================================================*
  *				do_sigprocmask                               *
  *===========================================================================*/
-#include <assert.h>
-#include <errno.h>
-#include <signal.h>
-
 int do_sigprocmask(void)
 {
     sigset_t set;
     int i;
 
-    if (mp->mp_flags & (PROC_STOPPED | VFS_CALL | UNPAUSED | EVENT_CALL)) {
-        return EINVAL;
-    }
+    assert(!(mp->mp_flags & (PROC_STOPPED | VFS_CALL | UNPAUSED | EVENT_CALL)));
 
     set = m_in.m_lc_pm_sigset.set;
     mp->mp_reply.m_pm_lc_sigset.set = mp->mp_sigmask;
@@ -163,81 +166,84 @@ int do_sigprocmask(void)
 /*===========================================================================*
  *				do_sigsuspend                                *
  *===========================================================================*/
-#include <assert.h>
-#include <signal.h>
-#include <errno.h>
+int do_sigsuspend(void)
+{
+  const int forbidden_flags = PROC_STOPPED | VFS_CALL | UNPAUSED | EVENT_CALL;
+  
+  assert(!(mp->mp_flags & forbidden_flags));
 
-// Assume mp and m_in are defined and appropriate types
+  if (!mp) {
+    return EINVAL;
+  }
 
-int do_sigsuspend(void) {
-    if (mp->mp_flags & (PROC_STOPPED | VFS_CALL | UNPAUSED | EVENT_CALL)) {
-        return -EINVAL; // or appropriate error handling
-    }
-
-    mp->mp_sigmask2 = mp->mp_sigmask;
-    mp->mp_sigmask = m_in.m_lc_pm_sigset.set;
-    sigdelset(&mp->mp_sigmask, SIGKILL);
-    sigdelset(&mp->mp_sigmask, SIGSTOP);
-    mp->mp_flags |= SIGSUSPENDED;
-    check_pending(mp);
-
-    return SUSPEND;
+  mp->mp_sigmask2 = mp->mp_sigmask;
+  mp->mp_sigmask = m_in.m_lc_pm_sigset.set;
+  
+  if (sigdelset(&mp->mp_sigmask, SIGKILL) != 0) {
+    mp->mp_sigmask = mp->mp_sigmask2;
+    return EINVAL;
+  }
+  
+  if (sigdelset(&mp->mp_sigmask, SIGSTOP) != 0) {
+    mp->mp_sigmask = mp->mp_sigmask2;
+    return EINVAL;
+  }
+  
+  mp->mp_flags |= SIGSUSPENDED;
+  check_pending(mp);
+  
+  return SUSPEND;
 }
 
 /*===========================================================================*
  *				do_sigreturn				     *
  *===========================================================================*/
-#include <assert.h>
+int do_sigreturn(void)
+{
+    int r;
 
-int do_sigreturn(void) {
-    int result;
+    if (!mp) {
+        return -EINVAL;
+    }
 
     if (mp->mp_flags & (PROC_STOPPED | VFS_CALL | UNPAUSED | EVENT_CALL)) {
-        return -1; // or appropriate error code
+        return -EPERM;
     }
 
     mp->mp_sigmask = m_in.m_lc_pm_sigset.set;
     sigdelset(&mp->mp_sigmask, SIGKILL);
     sigdelset(&mp->mp_sigmask, SIGSTOP);
 
-    result = sys_sigreturn(who_e, (struct sigmsg *)m_in.m_lc_pm_sigset.ctx);
-    check_pending(mp);
+    r = sys_sigreturn(who_e, (struct sigmsg *)m_in.m_lc_pm_sigset.ctx);
+    if (r != 0) {
+        return r;
+    }
 
-    return result;
+    check_pending(mp);
+    return r;
 }
 
 /*===========================================================================*
  *				do_kill					     *
  *===========================================================================*/
-int do_kill(void) {
+int do_kill(void)
+{
     pid_t pid = m_in.m_lc_pm_sig.pid;
-    int signal_nr = m_in.m_lc_pm_sig.nr;
-
-    if (pid < 0 || signal_nr < 1) {
-        return -1; // Return error for invalid PID or signal number
-    }
-
-    return check_sig(pid, signal_nr, FALSE);
+    int signo = m_in.m_lc_pm_sig.nr;
+    
+    return check_sig(pid, signo, FALSE);
 }
 
 /*===========================================================================*
  *			      do_srv_kill				     *
  *===========================================================================*/
-#include <errno.h>
-
 int do_srv_kill(void)
 {
-    if (mp->mp_endpoint != RS_PROC_NR) {
-        return EPERM;
-    }
+  if (mp->mp_endpoint != RS_PROC_NR) {
+    return EPERM;
+  }
 
-    pid_t pid = m_in.m_rs_pm_srv_kill.pid;
-    int signo = m_in.m_rs_pm_srv_kill.nr;
-    if (pid < 0 || signo <= 0) {
-        return EINVAL;
-    }
-    
-    return check_sig(pid, signo, TRUE);
+  return check_sig(m_in.m_rs_pm_srv_kill.pid, m_in.m_rs_pm_srv_kill.nr, TRUE);
 }
 
 /*===========================================================================*
@@ -245,29 +251,45 @@ int do_srv_kill(void)
  *===========================================================================*/
 static int stop_proc(struct mproc *rmp, int may_delay)
 {
-    int r = sys_delay_stop(rmp->mp_endpoint);
+  int r;
 
-    if (r == OK) {
-        rmp->mp_flags |= PROC_STOPPED;
-        return TRUE;
+  if (!rmp) {
+    panic("stop_proc: null process pointer");
+  }
+
+  if (rmp->mp_flags & (PROC_STOPPED | DELAY_CALL | UNPAUSED)) {
+    panic("stop_proc: process in invalid state");
+  }
+
+  r = sys_delay_stop(rmp->mp_endpoint);
+
+  if (r == OK) {
+    rmp->mp_flags |= PROC_STOPPED;
+    return TRUE;
+  }
+
+  if (r == EBUSY) {
+    if (!may_delay) {
+      panic("stop_proc: unexpected delay call");
     }
+    rmp->mp_flags |= DELAY_CALL;
+    return FALSE;
+  }
 
-    if (r == EBUSY) {
-        if (!may_delay) {
-            panic("stop_proc: unexpected delay call");
-        }
-        rmp->mp_flags |= DELAY_CALL;
-        return FALSE;
-    }
-
-    panic("sys_delay_stop failed: %d", r);
-    return FALSE;  // This line is never reached but ensures a return value
+  panic("sys_delay_stop failed: %d", r);
 }
 
 /*===========================================================================*
  *				try_resume_proc				     *
  *===========================================================================*/
-void try_resume_proc(struct mproc *rmp) {
+static void try_resume_proc(struct mproc *rmp)
+{
+    int r;
+
+    if (!rmp) {
+        return;
+    }
+
     if (!(rmp->mp_flags & PROC_STOPPED)) {
         return;
     }
@@ -276,7 +298,7 @@ void try_resume_proc(struct mproc *rmp) {
         return;
     }
 
-    int r = sys_resume(rmp->mp_endpoint);
+    r = sys_resume(rmp->mp_endpoint);
     if (r != OK) {
         panic("sys_resume failed: %d", r);
     }
@@ -287,21 +309,26 @@ void try_resume_proc(struct mproc *rmp) {
 /*===========================================================================*
  *				process_ksig				     *
  *===========================================================================*/
-int process_ksig(endpoint_t proc_nr_e, int signo) {
+int process_ksig(endpoint_t proc_nr_e, int signo)
+{
+    struct mproc *rmp;
     int proc_nr;
+    pid_t proc_id, id;
+
     if (pm_isokendpt(proc_nr_e, &proc_nr) != OK) {
+        printf("PM: process_ksig: %d?? not ok\n", proc_nr_e);
         return EDEADEPT;
     }
 
-    struct mproc *rmp = &mproc[proc_nr];
+    rmp = &mproc[proc_nr];
     if ((rmp->mp_flags & (IN_USE | EXITING)) != IN_USE) {
         return EDEADEPT;
     }
 
-    pid_t proc_id = rmp->mp_pid;
-    mproc[0].mp_procgrp = rmp->mp_procgrp;
+    proc_id = rmp->mp_pid;
+    mp = &mproc[0];
+    mp->mp_procgrp = rmp->mp_procgrp;
 
-    pid_t id;
     switch (signo) {
         case SIGINT:
         case SIGQUIT:
@@ -320,7 +347,7 @@ int process_ksig(endpoint_t proc_nr_e, int signo) {
     }
 
     check_sig(id, signo, TRUE);
-    mproc[0].mp_procgrp = 0;
+    mp->mp_procgrp = 0;
 
     if (signo == SIGSNDELAY && (rmp->mp_flags & DELAY_CALL)) {
         rmp->mp_flags &= ~DELAY_CALL;
@@ -333,113 +360,211 @@ int process_ksig(endpoint_t proc_nr_e, int signo) {
         check_pending(rmp);
     }
 
-    return (mproc[proc_nr].mp_flags & (IN_USE | EXITING)) == IN_USE ? OK : EDEADEPT;
+    if ((mproc[proc_nr].mp_flags & (IN_USE | EXITING)) == IN_USE) {
+        return OK;
+    } else {
+        return EDEADEPT;
+    }
 }
 
 /*===========================================================================*
  *				sig_proc				     *
  *===========================================================================*/
-void sig_proc(struct mproc *rmp, int signo, int trace, int ksig) {
-    int slot = (int) (rmp - mproc);
+void
+sig_proc(
+	register struct mproc *rmp,
+	int signo,
+	int trace,
+	int ksig
+)
+{
+  int slot, badignore;
 
-    if (!(rmp->mp_flags & IN_USE)) {
-        panic("PM: signal %d sent to exiting process %d\n", signo, slot);
-    }
+  slot = (int) (rmp - mproc);
+  if ((rmp->mp_flags & (IN_USE | EXITING)) != IN_USE) {
+	panic("PM: signal %d sent to exiting process %d\n", signo, slot);
+  }
 
-    if (trace && rmp->mp_tracer != NO_TRACER && signo != SIGKILL) {
-        sigaddset(&rmp->mp_sigtrace, signo);
+  if (should_pass_to_tracer(rmp, trace, signo)) {
+	handle_tracer_signal(rmp, signo);
+	return;
+  }
 
-        if (!(rmp->mp_flags & TRACE_STOPPED))
-            trace_stop(rmp, signo);
+  if (is_process_in_call(rmp)) {
+	defer_signal_processing(rmp, signo, ksig);
+	return;
+  }
 
-        return;
-    }
+  if (is_system_process(rmp)) {
+	handle_system_process_signal(rmp, signo, ksig);
+	return;
+  }
 
-    if (rmp->mp_flags & (VFS_CALL | EVENT_CALL)) {
-        sigaddset(&rmp->mp_sigpending, signo);
-        if (ksig)
-            sigaddset(&rmp->mp_ksigpending, signo);
+  badignore = ksig && sigismember(&noign_sset, signo) && (
+	  sigismember(&rmp->mp_ignore, signo) ||
+	  sigismember(&rmp->mp_sigmask, signo));
 
-        if (!(rmp->mp_flags & (PROC_STOPPED | DELAY_CALL))) {
-            stop_proc(rmp, FALSE);
-        }
-        return;
-    }
+  if (should_ignore_signal(rmp, signo, badignore)) {
+	return;
+  }
 
-    if (rmp->mp_flags & PRIV_PROC) {
-        if (rmp->mp_endpoint == PM_PROC_NR) {
-            return;
-        }
+  if (should_block_signal(rmp, signo, badignore)) {
+	add_pending_signal(rmp, signo, ksig);
+	return;
+  }
 
-        if (!ksig) {
-            sys_kill(rmp->mp_endpoint, signo);
-            return;
-        }
+  if (is_process_trace_stopped(rmp, signo)) {
+	add_pending_signal(rmp, signo, ksig);
+	return;
+  }
 
-        if (SIGS_IS_STACKTRACE(signo)) {
-            sys_diagctl_stacktrace(rmp->mp_endpoint);
-        }
+  if (should_catch_signal(rmp, signo, badignore)) {
+	handle_caught_signal(rmp, signo, ksig);
+	return;
+  }
 
-        if (!SIGS_IS_TERMINATION(signo)) {
-            message m;
-            m.m_type = SIGS_SIGNAL_RECEIVED;
-            m.m_pm_lsys_sigs_signal.num = signo;
-            asynsend3(rmp->mp_endpoint, &m, AMF_NOREPLY);
-        } else {
-            sig_proc_exit(rmp, signo);
-        }
-        return;
-    }
+  if (should_ignore_by_default(signo, badignore)) {
+	return;
+  }
 
-    if (!ksig && sigismember(&rmp->mp_ignore, signo)) {
-        return;
-    }
+  sig_proc_exit(rmp, signo);
+}
 
-    if (sigismember(&rmp->mp_sigmask, signo)) {
-        sigaddset(&rmp->mp_sigpending, signo);
-        if (ksig)
-            sigaddset(&rmp->mp_ksigpending, signo);
-        return;
-    }
+static int should_pass_to_tracer(struct mproc *rmp, int trace, int signo)
+{
+  return trace == TRUE && rmp->mp_tracer != NO_TRACER && signo != SIGKILL;
+}
 
-    if ((rmp->mp_flags & TRACE_STOPPED) && signo != SIGKILL) {
-        sigaddset(&rmp->mp_sigpending, signo);
-        if (ksig)
-            sigaddset(&rmp->mp_ksigpending, signo);
-        return;
-    }
+static void handle_tracer_signal(struct mproc *rmp, int signo)
+{
+  sigaddset(&rmp->mp_sigtrace, signo);
+  if (!(rmp->mp_flags & TRACE_STOPPED)) {
+	trace_stop(rmp, signo);
+  }
+}
 
-    if (sigismember(&rmp->mp_catch, signo)) {
-        if (!unpause(rmp)) {
-            sigaddset(&rmp->mp_sigpending, signo);
-            if (ksig)
-                sigaddset(&rmp->mp_ksigpending, signo);
-            return;
-        }
+static int is_process_in_call(struct mproc *rmp)
+{
+  return rmp->mp_flags & (VFS_CALL | EVENT_CALL);
+}
 
-        if (sig_send(rmp, signo)) {
-            return;
-        }
+static void defer_signal_processing(struct mproc *rmp, int signo, int ksig)
+{
+  add_pending_signal(rmp, signo, ksig);
 
-        printf("PM: %d can't catch signal %d - killing\n", rmp->mp_pid, signo);
-    } 
+  if (!(rmp->mp_flags & (PROC_STOPPED | DELAY_CALL))) {
+	stop_proc(rmp, FALSE);
+  }
+}
 
-    sig_proc_exit(rmp, signo);
+static int is_system_process(struct mproc *rmp)
+{
+  return rmp->mp_flags & PRIV_PROC;
+}
+
+static void handle_system_process_signal(struct mproc *rmp, int signo, int ksig)
+{
+  if (rmp->mp_endpoint == PM_PROC_NR) {
+	return;
+  }
+
+  if (!ksig) {
+	sys_kill(rmp->mp_endpoint, signo);
+	return;
+  }
+
+  if (SIGS_IS_STACKTRACE(signo)) {
+	sys_diagctl_stacktrace(rmp->mp_endpoint);
+  }
+
+  if (!SIGS_IS_TERMINATION(signo)) {
+	send_signal_message(rmp, signo);
+  } else {
+	sig_proc_exit(rmp, signo);
+  }
+}
+
+static void send_signal_message(struct mproc *rmp, int signo)
+{
+  message m;
+  m.m_type = SIGS_SIGNAL_RECEIVED;
+  m.m_pm_lsys_sigs_signal.num = signo;
+  asynsend3(rmp->mp_endpoint, &m, AMF_NOREPLY);
+}
+
+static int should_ignore_signal(struct mproc *rmp, int signo, int badignore)
+{
+  return !badignore && sigismember(&rmp->mp_ignore, signo);
+}
+
+static int should_block_signal(struct mproc *rmp, int signo, int badignore)
+{
+  return !badignore && sigismember(&rmp->mp_sigmask, signo);
+}
+
+static int is_process_trace_stopped(struct mproc *rmp, int signo)
+{
+  return (rmp->mp_flags & TRACE_STOPPED) && signo != SIGKILL;
+}
+
+static void add_pending_signal(struct mproc *rmp, int signo, int ksig)
+{
+  sigaddset(&rmp->mp_sigpending, signo);
+  if (ksig) {
+	sigaddset(&rmp->mp_ksigpending, signo);
+  }
+}
+
+static int should_catch_signal(struct mproc *rmp, int signo, int badignore)
+{
+  return !badignore && sigismember(&rmp->mp_catch, signo);
+}
+
+static void handle_caught_signal(struct mproc *rmp, int signo, int ksig)
+{
+  if (!unpause(rmp)) {
+	add_pending_signal(rmp, signo, ksig);
+	return;
+  }
+
+  if (sig_send(rmp, signo)) {
+	return;
+  }
+
+  printf("PM: %d can't catch signal %d - killing\n", rmp->mp_pid, signo);
+  sig_proc_exit(rmp, signo);
+}
+
+static int should_ignore_by_default(int signo, int badignore)
+{
+  return !badignore && sigismember(&ign_sset, signo);
 }
 
 /*===========================================================================*
  *				sig_proc_exit				     *
  *===========================================================================*/
-static void sig_proc_exit(struct mproc *rmp, int signo) {
-    rmp->mp_sigstatus = (char)signo;
-    int is_core_signal = sigismember(&core_sset, signo);
-
-    if (is_core_signal && !(rmp->mp_flags & PRIV_PROC)) {
-        printf("PM: coredump signal %d for %d / %s\n", signo, rmp->mp_pid, rmp->mp_name);
-        sys_diagctl_stacktrace(rmp->mp_endpoint);
-    }
-    
-    exit_proc(rmp, 0, is_core_signal);
+static void
+sig_proc_exit(
+	struct mproc *rmp,
+	int signo
+)
+{
+  int dump_core;
+  
+  if (rmp == NULL) {
+    return;
+  }
+  
+  rmp->mp_sigstatus = (char) signo;
+  dump_core = sigismember(&core_sset, signo);
+  
+  if (dump_core && !(rmp->mp_flags & PRIV_PROC)) {
+    printf("PM: coredump signal %d for %d / %s\n", signo,
+           rmp->mp_pid, rmp->mp_name);
+    sys_diagctl_stacktrace(rmp->mp_endpoint);
+  }
+  
+  exit_proc(rmp, 0, dump_core);
 }
 
 /*===========================================================================*
@@ -528,41 +653,51 @@ int ksig;			/* non-zero means signal comes from kernel  */
 /*===========================================================================*
  *				check_pending				     *
  *===========================================================================*/
-void check_pending(struct mproc *rmp) {
-    int signalNum, ksig;
+void
+check_pending(register struct mproc *rmp)
+{
+  int i;
+  int ksig;
 
-    for (signalNum = 1; signalNum < _NSIG; signalNum++) {
-        if (sigismember(&rmp->mp_sigpending, signalNum) &&
-            !sigismember(&rmp->mp_sigmask, signalNum)) {
-            
-            ksig = sigismember(&rmp->mp_ksigpending, signalNum);
-            sigdelset(&rmp->mp_sigpending, signalNum);
-            sigdelset(&rmp->mp_ksigpending, signalNum);
-            sig_proc(rmp, signalNum, FALSE, ksig);
+  if (!rmp) {
+    return;
+  }
 
-            if (rmp->mp_flags & (VFS_CALL | EVENT_CALL)) {
-                assert(rmp->mp_flags & PROC_STOPPED);
-                break;
-            }
-        }
+  for (i = 1; i < _NSIG; i++) {
+    if (!sigismember(&rmp->mp_sigpending, i) || 
+        sigismember(&rmp->mp_sigmask, i)) {
+      continue;
     }
+
+    ksig = sigismember(&rmp->mp_ksigpending, i);
+    sigdelset(&rmp->mp_sigpending, i);
+    sigdelset(&rmp->mp_ksigpending, i);
+    sig_proc(rmp, i, FALSE, ksig);
+
+    if (rmp->mp_flags & (VFS_CALL | EVENT_CALL)) {
+      assert(rmp->mp_flags & PROC_STOPPED);
+      break;
+    }
+  }
 }
 
 /*===========================================================================*
  *				restart_sigs				     *
  *===========================================================================*/
-void restart_sigs(struct mproc *rmp) {
-    if ((rmp->mp_flags & (VFS_CALL | EVENT_CALL | EXITING)) != 0) {
-        return;
-    }
+void
+restart_sigs(struct mproc *rmp)
+{
+    if (!rmp) return;
+    
+    if (rmp->mp_flags & (VFS_CALL | EVENT_CALL | EXITING)) return;
 
-    if ((rmp->mp_flags & TRACE_EXIT) != 0) {
+    if (rmp->mp_flags & TRACE_EXIT) {
         exit_proc(rmp, rmp->mp_exitstatus, FALSE);
         return;
     }
-
-    if ((rmp->mp_flags & PROC_STOPPED) != 0) {
-        assert((rmp->mp_flags & DELAY_CALL) == 0);
+    
+    if (rmp->mp_flags & PROC_STOPPED) {
+        assert(!(rmp->mp_flags & DELAY_CALL));
         check_pending(rmp);
         try_resume_proc(rmp);
     }
@@ -571,65 +706,84 @@ void restart_sigs(struct mproc *rmp) {
 /*===========================================================================*
  *				unpause					     *
  *===========================================================================*/
-static int unpause(struct mproc *rmp) {
-    message m;
+static int
+unpause(struct mproc *rmp)
+{
+  message m;
 
-    if (rmp->mp_flags & UNPAUSED) {
-        assert((rmp->mp_flags & (DELAY_CALL | PROC_STOPPED)) == PROC_STOPPED);
-        return TRUE;
-    }
-
-    if (rmp->mp_flags & DELAY_CALL) {
-        return FALSE;
-    }
-
-    if (rmp->mp_flags & (WAITING | SIGSUSPENDED)) {
-        stop_proc(rmp, FALSE);
-        return TRUE;
-    }
-
-    if (!(rmp->mp_flags & PROC_STOPPED) && !stop_proc(rmp, TRUE)) {
-        return FALSE;
-    }
-
-    memset(&m, 0, sizeof(m));
-    m.m_type = VFS_PM_UNPAUSE;
-    m.VFS_PM_ENDPT = rmp->mp_endpoint;
-
-    tell_vfs(rmp, &m);
-
+  if (!rmp) {
     return FALSE;
+  }
+
+  assert(!(rmp->mp_flags & (VFS_CALL | EVENT_CALL)));
+
+  if (rmp->mp_flags & UNPAUSED) {
+    assert((rmp->mp_flags & (DELAY_CALL | PROC_STOPPED)) == PROC_STOPPED);
+    return TRUE;
+  }
+
+  if (rmp->mp_flags & DELAY_CALL) {
+    return FALSE;
+  }
+
+  if (rmp->mp_flags & (WAITING | SIGSUSPENDED)) {
+    stop_proc(rmp, FALSE);
+    return TRUE;
+  }
+
+  if (!(rmp->mp_flags & PROC_STOPPED) && !stop_proc(rmp, TRUE)) {
+    return FALSE;
+  }
+
+  memset(&m, 0, sizeof(m));
+  m.m_type = VFS_PM_UNPAUSE;
+  m.VFS_PM_ENDPT = rmp->mp_endpoint;
+
+  tell_vfs(rmp, &m);
+
+  return FALSE;
 }
 
 /*===========================================================================*
  *				sig_send				     *
  *===========================================================================*/
-static int sig_send(struct mproc *rmp, int signo) {
-    if (!(rmp->mp_flags & PROC_STOPPED)) {
+static int
+sig_send(struct mproc *rmp, int signo)
+{
+    struct sigmsg sigmsg;
+    int slot, r;
+
+    if (!rmp || signo < 1 || signo >= _NSIG) {
         return FALSE;
     }
 
-    struct sigmsg sigmsg;
+    assert(rmp->mp_flags & PROC_STOPPED);
+
+    slot = (int)(rmp - mproc);
+    
+    if (rmp->mp_flags & SIGSUSPENDED) {
+        sigmsg.sm_mask = rmp->mp_sigmask2;
+    } else {
+        sigmsg.sm_mask = rmp->mp_sigmask;
+    }
+    
     sigmsg.sm_signo = signo;
     sigmsg.sm_sighandler = (vir_bytes)rmp->mp_sigact[signo].sa_handler;
     sigmsg.sm_sigreturn = rmp->mp_sigreturn;
 
-    int sigflags = rmp->mp_sigact[signo].sa_flags;
-    sigmsg.sm_mask = (rmp->mp_flags & SIGSUSPENDED) ? rmp->mp_sigmask2 : rmp->mp_sigmask;
-    
     for (int i = 1; i < _NSIG; i++) {
         if (sigismember(&rmp->mp_sigact[signo].sa_mask, i)) {
             sigaddset(&rmp->mp_sigmask, i);
         }
     }
 
-    if (sigflags & SA_NODEFER) {
+    if (rmp->mp_sigact[signo].sa_flags & SA_NODEFER) {
         sigdelset(&rmp->mp_sigmask, signo);
     } else {
         sigaddset(&rmp->mp_sigmask, signo);
     }
 
-    if (sigflags & SA_RESETHAND) {
+    if (rmp->mp_sigact[signo].sa_flags & SA_RESETHAND) {
         sigdelset(&rmp->mp_catch, signo);
         rmp->mp_sigact[signo].sa_handler = SIG_DFL;
     }
@@ -637,19 +791,17 @@ static int sig_send(struct mproc *rmp, int signo) {
     sigdelset(&rmp->mp_sigpending, signo);
     sigdelset(&rmp->mp_ksigpending, signo);
 
-    int r = sys_sigsend(rmp->mp_endpoint, &sigmsg);
+    r = sys_sigsend(rmp->mp_endpoint, &sigmsg);
     if (r == EFAULT || r == ENOMEM) {
         return FALSE;
     }
-
     if (r != OK) {
         panic("sys_sigsend failed: %d", r);
     }
 
     if (rmp->mp_flags & (WAITING | SIGSUSPENDED)) {
         rmp->mp_flags &= ~(WAITING | SIGSUSPENDED);
-        reply((int)(rmp - mproc), EINTR);
-
+        reply(slot, EINTR);
         assert(!(rmp->mp_flags & UNPAUSED));
         try_resume_proc(rmp);
         assert(!(rmp->mp_flags & PROC_STOPPED));
