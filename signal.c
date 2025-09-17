@@ -37,97 +37,52 @@ static void sig_proc_exit(struct mproc *rmp, int signo);
 /*===========================================================================*
  *				do_sigaction				     *
  *===========================================================================*/
-int validate_signal_number(int sig_nr)
-{
-    if (sig_nr == SIGKILL) return OK;
-    if (sig_nr < 1 || sig_nr >= _NSIG) return EINVAL;
-    return -1;
-}
-
-int copy_old_action(struct sigaction *svp)
-{
-    if (m_in.m_lc_pm_sig.oact != 0) {
-        return sys_datacopy(PM_PROC_NR, (vir_bytes)svp, who_e,
-                           m_in.m_lc_pm_sig.oact, (phys_bytes)sizeof(struct sigaction));
-    }
-    return OK;
-}
-
-int read_new_action(struct sigaction *svec)
-{
-    return sys_datacopy(who_e, m_in.m_lc_pm_sig.act, PM_PROC_NR, 
-                       (vir_bytes)svec, (phys_bytes)sizeof(struct sigaction));
-}
-
-void handle_sig_ign(int sig_nr)
-{
-    sigaddset(&mp->mp_ignore, sig_nr);
-    sigdelset(&mp->mp_sigpending, sig_nr);
-    sigdelset(&mp->mp_ksigpending, sig_nr);
-    sigdelset(&mp->mp_catch, sig_nr);
-}
-
-void handle_sig_dfl(int sig_nr)
-{
-    sigdelset(&mp->mp_ignore, sig_nr);
-    sigdelset(&mp->mp_catch, sig_nr);
-}
-
-void handle_sig_catch(int sig_nr)
-{
-    sigdelset(&mp->mp_ignore, sig_nr);
-    sigaddset(&mp->mp_catch, sig_nr);
-}
-
-void update_signal_handler(int sig_nr, struct sigaction *svec)
-{
-    if (svec->sa_handler == SIG_IGN) {
-        handle_sig_ign(sig_nr);
-    } else if (svec->sa_handler == SIG_DFL) {
-        handle_sig_dfl(sig_nr);
-    } else {
-        handle_sig_catch(sig_nr);
-    }
-}
-
-void update_signal_action(int sig_nr, struct sigaction *svec)
-{
-    mp->mp_sigact[sig_nr].sa_handler = svec->sa_handler;
-    sigdelset(&svec->sa_mask, SIGKILL);
-    sigdelset(&svec->sa_mask, SIGSTOP);
-    mp->mp_sigact[sig_nr].sa_mask = svec->sa_mask;
-    mp->mp_sigact[sig_nr].sa_flags = svec->sa_flags;
-    mp->mp_sigreturn = m_in.m_lc_pm_sig.ret;
-}
-
 int do_sigaction(void)
 {
-    int r, sig_nr;
-    struct sigaction svec;
-    struct sigaction *svp;
+  int r, sig_nr;
+  struct sigaction svec;
+  struct sigaction *svp;
 
-    assert(!(mp->mp_flags & (PROC_STOPPED | VFS_CALL | UNPAUSED | EVENT_CALL)));
+  assert(!(mp->mp_flags & (PROC_STOPPED | VFS_CALL | UNPAUSED | EVENT_CALL)));
 
-    sig_nr = m_in.m_lc_pm_sig.nr;
-    
-    r = validate_signal_number(sig_nr);
-    if (r != -1) return r;
+  sig_nr = m_in.m_lc_pm_sig.nr;
+  if (sig_nr == SIGKILL) return(OK);
+  if (sig_nr < 1 || sig_nr >= _NSIG) return(EINVAL);
 
-    svp = &mp->mp_sigact[sig_nr];
-    
-    r = copy_old_action(svp);
-    if (r != OK) return r;
+  svp = &mp->mp_sigact[sig_nr];
+  if (m_in.m_lc_pm_sig.oact != 0) {
+	r = sys_datacopy(PM_PROC_NR,(vir_bytes) svp, who_e,
+		m_in.m_lc_pm_sig.oact, (phys_bytes) sizeof(svec));
+	if (r != OK) return(r);
+  }
 
-    if (m_in.m_lc_pm_sig.act == 0)
-        return OK;
+  if (m_in.m_lc_pm_sig.act == 0)
+  	return(OK);
 
-    r = read_new_action(&svec);
-    if (r != OK) return r;
+  /* Read in the sigaction structure. */
+  r = sys_datacopy(who_e, m_in.m_lc_pm_sig.act, PM_PROC_NR, (vir_bytes) &svec,
+	  (phys_bytes) sizeof(svec));
+  if (r != OK) return(r);
 
-    update_signal_handler(sig_nr, &svec);
-    update_signal_action(sig_nr, &svec);
-    
-    return OK;
+  if (svec.sa_handler == SIG_IGN) {
+	sigaddset(&mp->mp_ignore, sig_nr);
+	sigdelset(&mp->mp_sigpending, sig_nr);
+	sigdelset(&mp->mp_ksigpending, sig_nr);
+	sigdelset(&mp->mp_catch, sig_nr);
+  } else if (svec.sa_handler == SIG_DFL) {
+	sigdelset(&mp->mp_ignore, sig_nr);
+	sigdelset(&mp->mp_catch, sig_nr);
+  } else {
+	sigdelset(&mp->mp_ignore, sig_nr);
+	sigaddset(&mp->mp_catch, sig_nr);
+  }
+  mp->mp_sigact[sig_nr].sa_handler = svec.sa_handler;
+  sigdelset(&svec.sa_mask, SIGKILL);
+  sigdelset(&svec.sa_mask, SIGSTOP);
+  mp->mp_sigact[sig_nr].sa_mask = svec.sa_mask;
+  mp->mp_sigact[sig_nr].sa_flags = svec.sa_flags;
+  mp->mp_sigreturn = m_in.m_lc_pm_sig.ret;
+  return(OK);
 }
 
 /*===========================================================================*
@@ -146,7 +101,18 @@ int do_sigpending(void)
  *===========================================================================*/
 int do_sigprocmask(void)
 {
+/* Note that the library interface passes the actual mask in sigmask_set,
+ * not a pointer to the mask, in order to save a copy.  Similarly,
+ * the old mask is placed in the return message which the library
+ * interface copies (if requested) to the user specified address.
+ *
+ * The library interface must set SIG_INQUIRE if the 'act' argument
+ * is NULL.
+ *
+ * KILL and STOP can't be masked.
+ */
   sigset_t set;
+  int i;
 
   assert(!(mp->mp_flags & (PROC_STOPPED | VFS_CALL | UNPAUSED | EVENT_CALL)));
 
@@ -155,56 +121,36 @@ int do_sigprocmask(void)
 
   switch (m_in.m_lc_pm_sigset.how) {
       case SIG_BLOCK:
-	return handle_sig_block(set);
+	sigdelset(&set, SIGKILL);
+	sigdelset(&set, SIGSTOP);
+	for (i = 1; i < _NSIG; i++) {
+		if (sigismember(&set, i))
+			sigaddset(&mp->mp_sigmask, i);
+	}
+	break;
 
       case SIG_UNBLOCK:
-	return handle_sig_unblock(set);
+	for (i = 1; i < _NSIG; i++) {
+		if (sigismember(&set, i))
+			sigdelset(&mp->mp_sigmask, i);
+	}
+	check_pending(mp);
+	break;
 
       case SIG_SETMASK:
-	return handle_sig_setmask(set);
+	sigdelset(&set, SIGKILL);
+	sigdelset(&set, SIGSTOP);
+	mp->mp_sigmask = set;
+	check_pending(mp);
+	break;
 
       case SIG_INQUIRE:
-	return OK;
+	break;
 
       default:
-	return EINVAL;
+	return(EINVAL);
+	break;
   }
-}
-
-static void remove_unmaskable_signals(sigset_t *set)
-{
-  sigdelset(set, SIGKILL);
-  sigdelset(set, SIGSTOP);
-}
-
-static void apply_signal_operation(sigset_t *set, void (*operation)(sigset_t *, int))
-{
-  int i;
-  for (i = 1; i < _NSIG; i++) {
-    if (sigismember(set, i))
-      operation(&mp->mp_sigmask, i);
-  }
-}
-
-static int handle_sig_block(sigset_t set)
-{
-  remove_unmaskable_signals(&set);
-  apply_signal_operation(&set, sigaddset);
-  return OK;
-}
-
-static int handle_sig_unblock(sigset_t set)
-{
-  apply_signal_operation(&set, sigdelset);
-  check_pending(mp);
-  return OK;
-}
-
-static int handle_sig_setmask(sigset_t set)
-{
-  remove_unmaskable_signals(&set);
-  mp->mp_sigmask = set;
-  check_pending(mp);
   return OK;
 }
 
@@ -215,13 +161,13 @@ int do_sigsuspend(void)
 {
   assert(!(mp->mp_flags & (PROC_STOPPED | VFS_CALL | UNPAUSED | EVENT_CALL)));
 
-  mp->mp_sigmask2 = mp->mp_sigmask;
+  mp->mp_sigmask2 = mp->mp_sigmask;	/* save the old mask */
   mp->mp_sigmask = m_in.m_lc_pm_sigset.set;
   sigdelset(&mp->mp_sigmask, SIGKILL);
   sigdelset(&mp->mp_sigmask, SIGSTOP);
   mp->mp_flags |= SIGSUSPENDED;
   check_pending(mp);
-  return SUSPEND;
+  return(SUSPEND);
 }
 
 /*===========================================================================*
@@ -229,6 +175,9 @@ int do_sigsuspend(void)
  *===========================================================================*/
 int do_sigreturn(void)
 {
+/* A user signal handler is done.  Restore context and check for
+ * pending unblocked signals.
+ */
   int r;
 
   assert(!(mp->mp_flags & (PROC_STOPPED | VFS_CALL | UNPAUSED | EVENT_CALL)));
@@ -247,7 +196,9 @@ int do_sigreturn(void)
  *===========================================================================*/
 int do_kill(void)
 {
-  return check_sig(m_in.m_lc_pm_sig.pid, m_in.m_lc_pm_sig.nr, FALSE);
+/* Perform the kill(pid, signo) system call. */
+
+  return check_sig(m_in.m_lc_pm_sig.pid, m_in.m_lc_pm_sig.nr, FALSE /* ksig */);
 }
 
 /*===========================================================================*
@@ -255,388 +206,360 @@ int do_kill(void)
  *===========================================================================*/
 int do_srv_kill(void)
 {
-  if (mp->mp_endpoint != RS_PROC_NR)
-    return EPERM;
+/* Perform the srv_kill(pid, signo) system call. */
 
-  return check_sig(m_in.m_rs_pm_srv_kill.pid, m_in.m_rs_pm_srv_kill.nr, TRUE);
+  /* Only RS is allowed to use srv_kill. */
+  if (mp->mp_endpoint != RS_PROC_NR)
+	return EPERM;
+
+  /* Pretend the signal comes from the kernel when RS wants to deliver a signal
+   * to a system process. RS sends a SIGKILL when it wants to perform cleanup.
+   * In that case, ksig == TRUE forces PM to exit the process immediately.
+   */
+  return check_sig(m_in.m_rs_pm_srv_kill.pid, m_in.m_rs_pm_srv_kill.nr,
+	  TRUE /* ksig */);
 }
 
 /*===========================================================================*
  *				stop_proc				     *
  *===========================================================================*/
-static int handle_stop_success(struct mproc *rmp)
-{
-    rmp->mp_flags |= PROC_STOPPED;
-    return TRUE;
-}
-
-static int handle_stop_busy(struct mproc *rmp, int may_delay)
-{
-    if (!may_delay)
-        panic("stop_proc: unexpected delay call");
-    
-    rmp->mp_flags |= DELAY_CALL;
-    return FALSE;
-}
-
 static int stop_proc(struct mproc *rmp, int may_delay)
 {
-    int r;
-    
-    assert(!(rmp->mp_flags & (PROC_STOPPED | DELAY_CALL | UNPAUSED)));
-    
-    r = sys_delay_stop(rmp->mp_endpoint);
-    
-    if (r == OK)
-        return handle_stop_success(rmp);
-    
-    if (r == EBUSY)
-        return handle_stop_busy(rmp, may_delay);
-    
-    panic("sys_delay_stop failed: %d", r);
+/* Try to stop the given process in the kernel. If successful, mark the process
+ * as stopped and return TRUE.  If the process is still busy sending a message,
+ * the behavior depends on the 'may_delay' parameter. If set, the process will
+ * be marked as having a delay call pending, and the function returns FALSE. If
+ * not set, the caller already knows that the process has no delay call, and PM
+ * will panic.
+ */
+  int r;
+
+  assert(!(rmp->mp_flags & (PROC_STOPPED | DELAY_CALL | UNPAUSED)));
+
+  r = sys_delay_stop(rmp->mp_endpoint);
+
+  /* If the process is still busy sending a message, the kernel will give us
+   * EBUSY now and send a SIGSNDELAY to the process as soon as sending is done.
+   */
+  switch (r) {
+  case OK:
+	rmp->mp_flags |= PROC_STOPPED;
+
+	return TRUE;
+
+  case EBUSY:
+	if (!may_delay)
+		panic("stop_proc: unexpected delay call");
+
+	rmp->mp_flags |= DELAY_CALL;
+
+	return FALSE;
+
+  default:
+	panic("sys_delay_stop failed: %d", r);
+  }
 }
 
 /*===========================================================================*
  *				try_resume_proc				     *
  *===========================================================================*/
-static int should_skip_resume(struct mproc *rmp)
-{
-    return (rmp->mp_flags & (VFS_CALL | EVENT_CALL | EXITING)) != 0;
-}
-
-static void clear_resume_flags(struct mproc *rmp)
-{
-    rmp->mp_flags &= ~(PROC_STOPPED | UNPAUSED);
-}
-
-static void perform_sys_resume(struct mproc *rmp)
-{
-    int r;
-    
-    if ((r = sys_resume(rmp->mp_endpoint)) != OK)
-        panic("sys_resume failed: %d", r);
-}
-
 static void try_resume_proc(struct mproc *rmp)
 {
-    assert(rmp->mp_flags & PROC_STOPPED);
-    
-    if (should_skip_resume(rmp))
-        return;
-    
-    perform_sys_resume(rmp);
-    clear_resume_flags(rmp);
+/* Resume the given process if possible. */
+  int r;
+
+  assert(rmp->mp_flags & PROC_STOPPED);
+
+  /* If the process is blocked on a VFS call or a process event notification,
+   * do not resume it now.  Most likely it will be unpausing, in which case the
+   * process must remain stopped.  Otherwise, it will still be resumed once the
+   * VFS or event call is replied to.  If the process has died, do not resume
+   * it either.
+   */
+  if (rmp->mp_flags & (VFS_CALL | EVENT_CALL | EXITING))
+	return;
+
+  if ((r = sys_resume(rmp->mp_endpoint)) != OK)
+	panic("sys_resume failed: %d", r);
+
+  /* Also unset the unpaused flag. We can safely assume that a stopped process
+   * need only be unpaused once, but once it is resumed, all bets are off.
+   */
+  rmp->mp_flags &= ~(PROC_STOPPED | UNPAUSED);
 }
 
 /*===========================================================================*
  *				process_ksig				     *
  *===========================================================================*/
-#define PROCESS_ACTIVE (IN_USE | EXITING)
-#define BROADCAST_TO_GROUP 0
-
-static int validate_process(endpoint_t proc_nr_e, int *proc_nr, struct mproc **rmp)
-{
-    if (pm_isokendpt(proc_nr_e, proc_nr) != OK) {
-        printf("PM: process_ksig: %d?? not ok\n", proc_nr_e);
-        return EDEADEPT;
-    }
-    
-    *rmp = &mproc[*proc_nr];
-    if ((*rmp)->mp_flags & PROCESS_ACTIVE != IN_USE) {
-        return EDEADEPT;
-    }
-    
-    return OK;
-}
-
-static pid_t get_signal_target(int signo, pid_t proc_id, int proc_nr)
-{
-    switch (signo) {
-        case SIGINT:
-        case SIGQUIT:
-        case SIGWINCH:
-        case SIGINFO:
-            return BROADCAST_TO_GROUP;
-        case SIGVTALRM:
-        case SIGPROF:
-            check_vtimer(proc_nr, signo);
-            return proc_id;
-        default:
-            return proc_id;
-    }
-}
-
-static void setup_pm_context(struct mproc *rmp)
-{
-    mp = &mproc[0];
-    mp->mp_procgrp = rmp->mp_procgrp;
-}
-
-static void restore_pm_context(void)
-{
-    mp->mp_procgrp = 0;
-}
-
-static int handle_sigsndelay(struct mproc *rmp)
-{
-    rmp->mp_flags &= ~DELAY_CALL;
-    assert(!(rmp->mp_flags & PROC_STOPPED));
-    
-    if (rmp->mp_flags & (VFS_CALL | EVENT_CALL)) {
-        stop_proc(rmp, FALSE);
-        return OK;
-    }
-    
-    check_pending(rmp);
-    assert(!(rmp->mp_flags & DELAY_CALL));
-    return OK;
-}
-
-static int check_process_alive(int proc_nr)
-{
-    if ((mproc[proc_nr].mp_flags & PROCESS_ACTIVE) == IN_USE) {
-        return OK;
-    }
-    return EDEADEPT;
-}
-
 int process_ksig(endpoint_t proc_nr_e, int signo)
 {
-    struct mproc *rmp;
-    int proc_nr;
-    pid_t proc_id, id;
-    
-    int result = validate_process(proc_nr_e, &proc_nr, &rmp);
-    if (result != OK) {
-        return result;
-    }
-    
-    proc_id = rmp->mp_pid;
-    setup_pm_context(rmp);
-    
-    id = get_signal_target(signo, proc_id, proc_nr);
-    check_sig(id, signo, TRUE);
-    
-    restore_pm_context();
-    
-    if (signo == SIGSNDELAY && (rmp->mp_flags & DELAY_CALL)) {
-        return handle_sigsndelay(rmp);
-    }
-    
-    return check_process_alive(proc_nr);
+  register struct mproc *rmp;
+  int proc_nr;
+  pid_t proc_id, id;
+
+  if(pm_isokendpt(proc_nr_e, &proc_nr) != OK) {
+	printf("PM: process_ksig: %d?? not ok\n", proc_nr_e);
+	return EDEADEPT; /* process is gone. */
+  }
+  rmp = &mproc[proc_nr];
+  if ((rmp->mp_flags & (IN_USE | EXITING)) != IN_USE) {
+#if 0
+	printf("PM: process_ksig: %d?? exiting / not in use\n", proc_nr_e);
+#endif
+	return EDEADEPT; /* process is gone. */
+  }
+  proc_id = rmp->mp_pid;
+  mp = &mproc[0];			/* pretend signals are from PM */
+  mp->mp_procgrp = rmp->mp_procgrp;	/* get process group right */
+
+  /* For SIGVTALRM and SIGPROF, see if we need to restart a
+   * virtual timer. For SIGINT, SIGINFO, SIGWINCH and SIGQUIT, use proc_id 0
+   * to indicate a broadcast to the recipient's process group.  For
+   * SIGKILL, use proc_id -1 to indicate a systemwide broadcast.
+   */
+  switch (signo) {
+      case SIGINT:
+      case SIGQUIT:
+      case SIGWINCH:
+      case SIGINFO:
+  	id = 0; break;	/* broadcast to process group */
+      case SIGVTALRM:
+      case SIGPROF:
+      	check_vtimer(proc_nr, signo);
+      	/* fall-through */
+      default:
+  	id = proc_id;
+  	break;
+  }
+  check_sig(id, signo, TRUE /* ksig */);
+  mp->mp_procgrp = 0;			/* restore proper PM process group */
+
+  /* If SIGSNDELAY is set, an earlier sys_stop() failed because the process was
+   * still sending, and the kernel hereby tells us that the process is now done
+   * with that. We can now try to resume what we planned to do in the first
+   * place: set up a signal handler. However, the process's message may have
+   * been a call to PM, in which case the process may have changed any of its
+   * signal settings. The process may also have forked, exited etcetera.
+   */
+  if (signo == SIGSNDELAY && (rmp->mp_flags & DELAY_CALL)) {
+	/* When getting SIGSNDELAY, the process is stopped at least until the
+	 * receipt of the SIGSNDELAY signal is acknowledged to the kernel. The
+	 * process is not stopped on PROC_STOP in the kernel. However, now that
+	 * there is no longer a delay call, stop_proc() is guaranteed to
+	 * succeed immediately.
+	 */
+	rmp->mp_flags &= ~DELAY_CALL;
+
+	assert(!(rmp->mp_flags & PROC_STOPPED));
+
+	/* If the delay call was to PM, it may have resulted in a VFS call. In
+	 * that case, we must wait with further signal processing until VFS has
+	 * replied. Stop the process.
+	 */
+	if (rmp->mp_flags & (VFS_CALL | EVENT_CALL)) {
+		stop_proc(rmp, FALSE /*may_delay*/);
+
+		return OK;
+	}
+
+	/* Process as many normal signals as possible. */
+	check_pending(rmp);
+
+	assert(!(rmp->mp_flags & DELAY_CALL));
+  }
+
+  /* See if the process is still alive */
+  if ((mproc[proc_nr].mp_flags & (IN_USE | EXITING)) == IN_USE)  {
+      return OK; /* signal has been delivered */
+  }
+  else {
+      return EDEADEPT; /* process is gone */
+  }
 }
 
 /*===========================================================================*
  *				sig_proc				     *
  *===========================================================================*/
-#define SIGNAL_FROM_TRACER TRUE
-#define SIGNAL_NOT_FROM_TRACER FALSE
-#define SIGNAL_FROM_KERNEL 1
-#define SIGNAL_NOT_FROM_KERNEL 0
-
-static int should_pass_to_debugger(struct mproc *rmp, int signo, int trace)
+void
+sig_proc(
+	register struct mproc *rmp,	/* pointer to the process to be signaled */
+	int signo,			/* signal to send to process (1 to _NSIG-1) */
+	int trace,			/* pass signal to tracer first? */
+	int ksig			/* non-zero means signal comes from kernel  */
+)
 {
-    return trace == SIGNAL_FROM_TRACER && 
-           rmp->mp_tracer != NO_TRACER && 
-           signo != SIGKILL;
-}
+/* Send a signal to a process.  Check to see if the signal is to be caught,
+ * ignored, tranformed into a message (for system processes) or blocked.
+ *  - If the signal is to be transformed into a message, request the KERNEL to
+ * send the target process a system notification with the pending signal as an
+ * argument.
+ *  - If the signal is to be caught, request the KERNEL to push a sigcontext
+ * structure and a sigframe structure onto the catcher's stack.  Also, KERNEL
+ * will reset the program counter and stack pointer, so that when the process
+ * next runs, it will be executing the signal handler. When the signal handler
+ * returns,  sigreturn(2) will be called.  Then KERNEL will restore the signal
+ * context from the sigcontext structure.
+ * If there is insufficient stack space, kill the process.
+ */
+  int slot, badignore;
 
-static void handle_debugger_signal(struct mproc *rmp, int signo)
-{
-    sigaddset(&rmp->mp_sigtrace, signo);
-    if (!(rmp->mp_flags & TRACE_STOPPED))
-        trace_stop(rmp, signo);
-}
+  slot = (int) (rmp - mproc);
+  if ((rmp->mp_flags & (IN_USE | EXITING)) != IN_USE) {
+	panic("PM: signal %d sent to exiting process %d\n", signo, slot);
+  }
 
-static int is_process_in_call(struct mproc *rmp)
-{
-    return rmp->mp_flags & (VFS_CALL | EVENT_CALL);
-}
+  if (trace == TRUE && rmp->mp_tracer != NO_TRACER && signo != SIGKILL) {
+	/* Signal should be passed to the debugger first.
+	 * This happens before any checks on block/ignore masks; otherwise,
+	 * the process itself could block/ignore debugger signals.
+	 */
 
-static void queue_signal(struct mproc *rmp, int signo, int ksig)
-{
-    sigaddset(&rmp->mp_sigpending, signo);
-    if (ksig)
-        sigaddset(&rmp->mp_ksigpending, signo);
-}
+	sigaddset(&rmp->mp_sigtrace, signo);
 
-static void handle_signal_during_call(struct mproc *rmp, int signo, int ksig)
-{
-    queue_signal(rmp, signo, ksig);
-    
-    if (!(rmp->mp_flags & (PROC_STOPPED | DELAY_CALL))) {
-        stop_proc(rmp, FALSE);
-    }
-}
+	if (!(rmp->mp_flags & TRACE_STOPPED))
+		trace_stop(rmp, signo);	/* a signal causes it to stop */
 
-static int is_pm_process(struct mproc *rmp)
-{
-    return rmp->mp_endpoint == PM_PROC_NR;
-}
+	return;
+  }
 
-static void forward_to_kernel(struct mproc *rmp, int signo)
-{
-    sys_kill(rmp->mp_endpoint, signo);
-}
+  if (rmp->mp_flags & (VFS_CALL | EVENT_CALL)) {
+	sigaddset(&rmp->mp_sigpending, signo);
+	if(ksig)
+		sigaddset(&rmp->mp_ksigpending, signo);
 
-static void handle_stacktrace_signal(int signo, struct mproc *rmp)
-{
-    if (SIGS_IS_STACKTRACE(signo)) {
-        sys_diagctl_stacktrace(rmp->mp_endpoint);
-    }
-}
+	/* Process the signal once VFS and process event subscribers reply.
+	 * Stop the process in the meantime, so that it cannot make another
+	 * call after the VFS reply comes in but before we look at its signals
+	 * again. Since we always stop the process to deliver signals during a
+	 * VFS or event call, the PROC_STOPPED flag doubles as an indicator in
+	 * restart_sigs() that signals must be rechecked after a reply arrives.
+	 */
+	if (!(rmp->mp_flags & (PROC_STOPPED | DELAY_CALL))) {
+		/* If a VFS call is ongoing and the process is not yet stopped,
+		 * the process must have made a call to PM. Therefore, there
+		 * can be no delay calls in this case.
+		 */
+		stop_proc(rmp, FALSE /*delay_call*/);
+	}
+	return;
+  }
 
-static void send_signal_message(struct mproc *rmp, int signo)
-{
-    message m;
-    m.m_type = SIGS_SIGNAL_RECEIVED;
-    m.m_pm_lsys_sigs_signal.num = signo;
-    asynsend3(rmp->mp_endpoint, &m, AMF_NOREPLY);
-}
+  /* Handle system signals for system processes first. */
+  if(rmp->mp_flags & PRIV_PROC) {
+   	/* Always skip signals for PM (only necessary when broadcasting). */
+   	if(rmp->mp_endpoint == PM_PROC_NR) {
+ 		return;
+   	}
 
-static void handle_system_signal(struct mproc *rmp, int signo, int ksig)
-{
-    if (is_pm_process(rmp))
-        return;
-    
-    if (!ksig) {
-        forward_to_kernel(rmp, signo);
-        return;
-    }
-    
-    handle_stacktrace_signal(signo, rmp);
-    
-    if (!SIGS_IS_TERMINATION(signo)) {
-        send_signal_message(rmp, signo);
-    } else {
-        sig_proc_exit(rmp, signo);
-    }
-}
+   	/* System signals have always to go through the kernel first to let it
+   	 * pick the right signal manager. If PM is the assigned signal manager,
+   	 * the signal will come back and will actually be processed.
+   	 */
+   	if(!ksig) {
+ 		sys_kill(rmp->mp_endpoint, signo);
+ 		return;
+   	}
 
-static int is_bad_ignore(struct mproc *rmp, int signo, int ksig)
-{
-    return ksig && sigismember(&noign_sset, signo) && 
-           (sigismember(&rmp->mp_ignore, signo) || 
-            sigismember(&rmp->mp_sigmask, signo));
-}
+  	/* Print stacktrace if necessary. */
+  	if(SIGS_IS_STACKTRACE(signo)) {
+		sys_diagctl_stacktrace(rmp->mp_endpoint);
+  	}
 
-static int should_ignore_signal(struct mproc *rmp, int signo, int badignore)
-{
-    return !badignore && sigismember(&rmp->mp_ignore, signo);
-}
+  	if(!SIGS_IS_TERMINATION(signo)) {
+		/* Translate every non-termination sys signal into a message. */
+		message m;
+		m.m_type = SIGS_SIGNAL_RECEIVED;
+		m.m_pm_lsys_sigs_signal.num = signo;
+		asynsend3(rmp->mp_endpoint, &m, AMF_NOREPLY);
+	}
+	else {
+		/* Exit the process in case of termination system signal. */
+		sig_proc_exit(rmp, signo);
+	}
+	return;
+  }
 
-static int should_block_signal(struct mproc *rmp, int signo, int badignore)
-{
-    return !badignore && sigismember(&rmp->mp_sigmask, signo);
-}
+  /* Handle user processes now. See if the signal cannot be safely ignored. */
+  badignore = ksig && sigismember(&noign_sset, signo) && (
+	  sigismember(&rmp->mp_ignore, signo) ||
+	  sigismember(&rmp->mp_sigmask, signo));
 
-static int is_stopped_for_debugger(struct mproc *rmp, int signo)
-{
-    return (rmp->mp_flags & TRACE_STOPPED) && signo != SIGKILL;
-}
+  if (!badignore && sigismember(&rmp->mp_ignore, signo)) {
+	/* Signal should be ignored. */
+	return;
+  }
+  if (!badignore && sigismember(&rmp->mp_sigmask, signo)) {
+	/* Signal should be blocked. */
+	sigaddset(&rmp->mp_sigpending, signo);
+	if(ksig)
+		sigaddset(&rmp->mp_ksigpending, signo);
+	return;
+  }
 
-static int should_catch_signal(struct mproc *rmp, int signo, int badignore)
-{
-    return !badignore && sigismember(&rmp->mp_catch, signo);
-}
+  if ((rmp->mp_flags & TRACE_STOPPED) && signo != SIGKILL) {
+	/* If the process is stopped for a debugger, do not deliver any signals
+	 * (except SIGKILL) in order not to confuse the debugger. The signals
+	 * will be delivered using the check_pending() calls in do_trace().
+	 */
+	sigaddset(&rmp->mp_sigpending, signo);
+	if(ksig)
+		sigaddset(&rmp->mp_ksigpending, signo);
+	return;
+  }
+  if (!badignore && sigismember(&rmp->mp_catch, signo)) {
+	/* Signal is caught. First interrupt the process's current call, if
+	 * applicable. This may involve a roundtrip to VFS, in which case we'll
+	 * have to check back later.
+	 */
+	if (!unpause(rmp)) {
+		/* not yet unpaused; continue later */
+		sigaddset(&rmp->mp_sigpending, signo);
+		if(ksig)
+			sigaddset(&rmp->mp_ksigpending, signo);
 
-static int should_ignore_by_default(int signo, int badignore)
-{
-    return !badignore && sigismember(&ign_sset, signo);
-}
+		return;
+	}
 
-static void handle_caught_signal(struct mproc *rmp, int signo, int ksig)
-{
-    if (!unpause(rmp)) {
-        queue_signal(rmp, signo, ksig);
-        return;
-    }
-    
-    if (sig_send(rmp, signo))
-        return;
-    
-    printf("PM: %d can't catch signal %d - killing\n", rmp->mp_pid, signo);
-    sig_proc_exit(rmp, signo);
-}
+	/* Then send the actual signal to the process, by setting up a signal
+	 * handler.
+	 */
+	if (sig_send(rmp, signo))
+		return;
 
-void sig_proc(register struct mproc *rmp, int signo, int trace, int ksig)
-{
-    int slot, badignore;
-    
-    slot = (int)(rmp - mproc);
-    if ((rmp->mp_flags & (IN_USE | EXITING)) != IN_USE) {
-        panic("PM: signal %d sent to exiting process %d\n", signo, slot);
-    }
-    
-    if (should_pass_to_debugger(rmp, signo, trace)) {
-        handle_debugger_signal(rmp, signo);
-        return;
-    }
-    
-    if (is_process_in_call(rmp)) {
-        handle_signal_during_call(rmp, signo, ksig);
-        return;
-    }
-    
-    if (rmp->mp_flags & PRIV_PROC) {
-        handle_system_signal(rmp, signo, ksig);
-        return;
-    }
-    
-    badignore = is_bad_ignore(rmp, signo, ksig);
-    
-    if (should_ignore_signal(rmp, signo, badignore))
-        return;
-    
-    if (should_block_signal(rmp, signo, badignore)) {
-        queue_signal(rmp, signo, ksig);
-        return;
-    }
-    
-    if (is_stopped_for_debugger(rmp, signo)) {
-        queue_signal(rmp, signo, ksig);
-        return;
-    }
-    
-    if (should_catch_signal(rmp, signo, badignore)) {
-        handle_caught_signal(rmp, signo, ksig);
-        return;
-    }
-    
-    if (should_ignore_by_default(signo, badignore))
-        return;
-    
-    sig_proc_exit(rmp, signo);
+	/* We were unable to spawn a signal handler. Kill the process. */
+	printf("PM: %d can't catch signal %d - killing\n",
+		rmp->mp_pid, signo);
+  }
+  else if (!badignore && sigismember(&ign_sset, signo)) {
+	/* Signal defaults to being ignored. */
+	return;
+  }
+
+  /* Terminate process */
+  sig_proc_exit(rmp, signo);
 }
 
 /*===========================================================================*
  *				sig_proc_exit				     *
  *===========================================================================*/
-static void sig_proc_exit(struct mproc *rmp, int signo)
+static void
+sig_proc_exit(
+	struct mproc *rmp,		/* process that must exit */
+	int signo			/* signal that caused termination */
+)
 {
-    rmp->mp_sigstatus = (char) signo;
-    int should_dump_core = should_create_core_dump(rmp, signo);
-    exit_proc(rmp, 0, should_dump_core);
-}
-
-static int should_create_core_dump(struct mproc *rmp, int signo)
-{
-    if (!sigismember(&core_sset, signo)) {
-        return FALSE;
-    }
-    
-    if (!(rmp->mp_flags & PRIV_PROC)) {
-        log_coredump_signal(rmp, signo);
-    }
-    
-    return TRUE;
-}
-
-static void log_coredump_signal(struct mproc *rmp, int signo)
-{
-    printf("PM: coredump signal %d for %d / %s\n", 
-           signo, rmp->mp_pid, rmp->mp_name);
-    sys_diagctl_stacktrace(rmp->mp_endpoint);
+  rmp->mp_sigstatus = (char) signo;
+  if (sigismember(&core_sset, signo)) {
+	if(!(rmp->mp_flags & PRIV_PROC)) {
+		printf("PM: coredump signal %d for %d / %s\n", signo,
+			rmp->mp_pid, rmp->mp_name);
+		sys_diagctl_stacktrace(rmp->mp_endpoint);
+	}
+	exit_proc(rmp, 0, TRUE /*dump_core*/);
+  }
+  else {
+  	exit_proc(rmp, 0, FALSE /*dump_core*/);
+  }
 }
 
 /*===========================================================================*
@@ -728,40 +651,34 @@ int ksig;			/* non-zero means signal comes from kernel  */
 void
 check_pending(register struct mproc *rmp)
 {
+  /* Check to see if any pending signals have been unblocked. Deliver as many
+   * of them as we can, until we have to wait for a reply from VFS first.
+   *
+   * There are several places in this file where the signal mask is
+   * changed.  At each such place, check_pending() should be called to
+   * check for newly unblocked signals.
+   */
   int i;
-  
+  int ksig;
+
   for (i = 1; i < _NSIG; i++) {
-    if (should_deliver_signal(rmp, i)) {
-      deliver_pending_signal(rmp, i);
-      
-      if (must_wait_for_reply(rmp)) {
-        assert(rmp->mp_flags & PROC_STOPPED);
-        break;
-      }
-    }
+	if (sigismember(&rmp->mp_sigpending, i) &&
+		!sigismember(&rmp->mp_sigmask, i)) {
+		ksig = sigismember(&rmp->mp_ksigpending, i);
+		sigdelset(&rmp->mp_sigpending, i);
+		sigdelset(&rmp->mp_ksigpending, i);
+		sig_proc(rmp, i, FALSE /*trace*/, ksig);
+
+		if (rmp->mp_flags & (VFS_CALL | EVENT_CALL)) {
+			/* Signals must be rechecked upon return from the new
+			 * VFS call, unless the process was killed. In both
+			 * cases, the process is stopped.
+			 */
+			assert(rmp->mp_flags & PROC_STOPPED);
+			break;
+		}
+	}
   }
-}
-
-static int
-should_deliver_signal(struct mproc *rmp, int signal_num)
-{
-  return sigismember(&rmp->mp_sigpending, signal_num) &&
-         !sigismember(&rmp->mp_sigmask, signal_num);
-}
-
-static void
-deliver_pending_signal(struct mproc *rmp, int signal_num)
-{
-  int ksig = sigismember(&rmp->mp_ksigpending, signal_num);
-  sigdelset(&rmp->mp_sigpending, signal_num);
-  sigdelset(&rmp->mp_ksigpending, signal_num);
-  sig_proc(rmp, signal_num, FALSE, ksig);
-}
-
-static int
-must_wait_for_reply(struct mproc *rmp)
-{
-  return rmp->mp_flags & (VFS_CALL | EVENT_CALL);
 }
 
 /*===========================================================================*
@@ -770,18 +687,30 @@ must_wait_for_reply(struct mproc *rmp)
 void
 restart_sigs(struct mproc *rmp)
 {
+/* VFS has replied to a request from us; do signal-related work.
+ */
+
   if (rmp->mp_flags & (VFS_CALL | EVENT_CALL | EXITING)) return;
 
   if (rmp->mp_flags & TRACE_EXIT) {
-    exit_proc(rmp, rmp->mp_exitstatus, FALSE);
-    return;
+	/* Tracer requested exit with specific exit value */
+	exit_proc(rmp, rmp->mp_exitstatus, FALSE /*dump_core*/);
   }
-  
-  if (!(rmp->mp_flags & PROC_STOPPED)) return;
-  
-  assert(!(rmp->mp_flags & DELAY_CALL));
-  check_pending(rmp);
-  try_resume_proc(rmp);
+  else if (rmp->mp_flags & PROC_STOPPED) {
+	/* If a signal arrives while we are performing a VFS call, the process
+	 * will always be stopped immediately. Thus, if the process is stopped
+	 * once the reply from VFS arrives, we might have to check signals.
+	 */
+	assert(!(rmp->mp_flags & DELAY_CALL));
+
+	/* We saved signal(s) for after finishing a VFS call. Deal with this.
+	 * PROC_STOPPED remains set to indicate the process is still stopped.
+	 */
+	check_pending(rmp);
+
+	/* Resume the process now, unless there is a reason not to. */
+	try_resume_proc(rmp);
+  }
 }
 
 /*===========================================================================*
@@ -789,36 +718,55 @@ restart_sigs(struct mproc *rmp)
  *===========================================================================*/
 static int
 unpause(
-	struct mproc *rmp
+	struct mproc *rmp		/* which process */
 )
 {
-	message m;
+/* A signal is to be sent to a process.  If that process is hanging on a
+ * system call, the system call must be terminated with EINTR.  First check if
+ * the process is hanging on an PM call.  If not, tell VFS, so it can check for
+ * interruptible calls such as READs and WRITEs from pipes, ttys and the like.
+ */
+  message m;
 
-	assert(!(rmp->mp_flags & (VFS_CALL | EVENT_CALL)));
+  assert(!(rmp->mp_flags & (VFS_CALL | EVENT_CALL)));
 
-	if (rmp->mp_flags & UNPAUSED) {
-		assert((rmp->mp_flags & (DELAY_CALL | PROC_STOPPED)) == PROC_STOPPED);
-		return TRUE;
-	}
+  /* If the UNPAUSED flag is set, VFS replied to an earlier unpause request. */
+  if (rmp->mp_flags & UNPAUSED) {
+	assert((rmp->mp_flags & (DELAY_CALL | PROC_STOPPED)) == PROC_STOPPED);
 
-	if (rmp->mp_flags & DELAY_CALL)
-		return FALSE;
+	return TRUE;
+  }
 
-	if (rmp->mp_flags & (WAITING | SIGSUSPENDED)) {
-		stop_proc(rmp, FALSE);
-		return TRUE;
-	}
-
-	if (!(rmp->mp_flags & PROC_STOPPED) && !stop_proc(rmp, TRUE))
-		return FALSE;
-
-	memset(&m, 0, sizeof(m));
-	m.m_type = VFS_PM_UNPAUSE;
-	m.VFS_PM_ENDPT = rmp->mp_endpoint;
-
-	tell_vfs(rmp, &m);
-
+  /* If the process is already stopping, don't do anything now. */
+  if (rmp->mp_flags & DELAY_CALL)
 	return FALSE;
+
+  /* Check to see if process is hanging on a WAIT or SIGSUSPEND call. */
+  if (rmp->mp_flags & (WAITING | SIGSUSPENDED)) {
+	/* Stop the process from running. Do not interrupt the actual call yet.
+	 * sig_send() will interrupt the call and resume the process afterward.
+	 * No delay calls: we know for a fact that the process called us.
+	 */
+	stop_proc(rmp, FALSE /*may_delay*/);
+
+	return TRUE;
+  }
+
+  /* Not paused in PM. Let VFS, and after that any matching process event
+   * subscribers, try to unpause the process. The process needs to be stopped
+   * for this. If it is not already stopped, try to stop it now. If that does
+   * not succeed immediately, postpone signal delivery.
+   */
+  if (!(rmp->mp_flags & PROC_STOPPED) && !stop_proc(rmp, TRUE /*may_delay*/))
+	return FALSE;
+
+  memset(&m, 0, sizeof(m));
+  m.m_type = VFS_PM_UNPAUSE;
+  m.VFS_PM_ENDPT = rmp->mp_endpoint;
+
+  tell_vfs(rmp, &m);
+
+  return FALSE;
 }
 
 /*===========================================================================*
@@ -826,103 +774,82 @@ unpause(
  *===========================================================================*/
 static int
 sig_send(
-	struct mproc *rmp,
-	int signo
+	struct mproc *rmp,		/* what process to spawn a signal handler in */
+	int signo			/* signal to send to process (1 to _NSIG-1) */
 )
 {
-	struct sigmsg sigmsg;
-	int slot;
+/* The process is supposed to catch this signal. Spawn a signal handler.
+ * Return TRUE if this succeeded, FALSE otherwise.
+ */
+  struct sigmsg sigmsg;
+  int i, r, sigflags, slot;
 
-	assert(rmp->mp_flags & PROC_STOPPED);
+  assert(rmp->mp_flags & PROC_STOPPED);
 
-	slot = (int) (rmp - mproc);
+  sigflags = rmp->mp_sigact[signo].sa_flags;
+  slot = (int) (rmp - mproc);
 
-	prepare_sigmsg(&sigmsg, rmp, signo);
-	update_signal_masks(rmp, signo);
-	handle_signal_flags(rmp, signo);
-	clear_pending_signals(rmp, signo);
+  if (rmp->mp_flags & SIGSUSPENDED)
+	sigmsg.sm_mask = rmp->mp_sigmask2;
+  else
+	sigmsg.sm_mask = rmp->mp_sigmask;
+  sigmsg.sm_signo = signo;
+  sigmsg.sm_sighandler =
+	(vir_bytes) rmp->mp_sigact[signo].sa_handler;
+  sigmsg.sm_sigreturn = rmp->mp_sigreturn;
+  for (i = 1; i < _NSIG; i++) {
+	if (sigismember(&rmp->mp_sigact[signo].sa_mask, i))
+		sigaddset(&rmp->mp_sigmask, i);
+  }
 
-	if (!deliver_signal(rmp, &sigmsg)) {
-		return FALSE;
-	}
+  if (sigflags & SA_NODEFER)
+	sigdelset(&rmp->mp_sigmask, signo);
+  else
+	sigaddset(&rmp->mp_sigmask, signo);
 
-	handle_process_state(rmp, slot);
+  if (sigflags & SA_RESETHAND) {
+	sigdelset(&rmp->mp_catch, signo);
+	rmp->mp_sigact[signo].sa_handler = SIG_DFL;
+  }
+  sigdelset(&rmp->mp_sigpending, signo);
+  sigdelset(&rmp->mp_ksigpending, signo);
 
-	return TRUE;
-}
+  /* Ask the kernel to deliver the signal */
+  r = sys_sigsend(rmp->mp_endpoint, &sigmsg);
+  /* sys_sigsend can fail legitimately with EFAULT or ENOMEM if the process
+   * memory can't accommodate the signal handler.  The target process will be
+   * killed in that case, so do not bother interrupting or resuming it.
+   */
+  if(r == EFAULT || r == ENOMEM) {
+	return(FALSE);
+  }
+  /* Other errors are unexpected pm/kernel discrepancies. */
+  if (r != OK) {
+	panic("sys_sigsend failed: %d", r);
+  }
 
-static void prepare_sigmsg(struct sigmsg *sigmsg, struct mproc *rmp, int signo)
-{
-	if (rmp->mp_flags & SIGSUSPENDED)
-		sigmsg->sm_mask = rmp->mp_sigmask2;
-	else
-		sigmsg->sm_mask = rmp->mp_sigmask;
-	
-	sigmsg->sm_signo = signo;
-	sigmsg->sm_sighandler = (vir_bytes) rmp->mp_sigact[signo].sa_handler;
-	sigmsg->sm_sigreturn = rmp->mp_sigreturn;
-}
-
-static void update_signal_masks(struct mproc *rmp, int signo)
-{
-	int i;
-	
-	for (i = 1; i < _NSIG; i++) {
-		if (sigismember(&rmp->mp_sigact[signo].sa_mask, i))
-			sigaddset(&rmp->mp_sigmask, i);
-	}
-}
-
-static void handle_signal_flags(struct mproc *rmp, int signo)
-{
-	int sigflags = rmp->mp_sigact[signo].sa_flags;
-	
-	if (sigflags & SA_NODEFER)
-		sigdelset(&rmp->mp_sigmask, signo);
-	else
-		sigaddset(&rmp->mp_sigmask, signo);
-
-	if (sigflags & SA_RESETHAND) {
-		sigdelset(&rmp->mp_catch, signo);
-		rmp->mp_sigact[signo].sa_handler = SIG_DFL;
-	}
-}
-
-static void clear_pending_signals(struct mproc *rmp, int signo)
-{
-	sigdelset(&rmp->mp_sigpending, signo);
-	sigdelset(&rmp->mp_ksigpending, signo);
-}
-
-static int deliver_signal(struct mproc *rmp, struct sigmsg *sigmsg)
-{
-	int r = sys_sigsend(rmp->mp_endpoint, sigmsg);
-	
-	if (r == EFAULT || r == ENOMEM) {
-		return FALSE;
-	}
-	
-	if (r != OK) {
-		panic("sys_sigsend failed: %d", r);
-	}
-	
-	return TRUE;
-}
-
-static void handle_process_state(struct mproc *rmp, int slot)
-{
-	if (rmp->mp_flags & (WAITING | SIGSUSPENDED)) {
-		resume_suspended_process(rmp, slot);
-	} else {
-		assert(rmp->mp_flags & UNPAUSED);
-	}
-}
-
-static void resume_suspended_process(struct mproc *rmp, int slot)
-{
+  /* Was the process suspended in PM? Then interrupt the blocking call. */
+  if (rmp->mp_flags & (WAITING | SIGSUSPENDED)) {
 	rmp->mp_flags &= ~(WAITING | SIGSUSPENDED);
+
 	reply(slot, EINTR);
+
+	/* The process must just have been stopped by unpause(), which means
+	 * that the UNPAUSE flag is not set.
+	 */
 	assert(!(rmp->mp_flags & UNPAUSED));
+
 	try_resume_proc(rmp);
+
 	assert(!(rmp->mp_flags & PROC_STOPPED));
+  } else {
+	/* If the process was not suspended in PM, VFS must first have
+	 * confirmed that it has tried to unsuspend any blocking call. Thus, we
+	 * got here from restart_sigs() as part of handling PM_UNPAUSE_REPLY,
+	 * and restart_sigs() will resume the process later.
+	 */
+	assert(rmp->mp_flags & UNPAUSED);
+  }
+
+  return(TRUE);
 }
